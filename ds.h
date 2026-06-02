@@ -834,6 +834,44 @@ struct DesignDB {
         }
     }
 
+    void buildConstraintGraph(ConstraintKind kind) {
+        clearSPFAGraph();
+
+        for (const auto& path : paths) {
+            if (!path.valid()) {
+                continue;
+            }
+
+            int launch = path.launchFF;
+            int capture = path.captureFF;
+
+            if (kind == ConstraintKind::SETUP) {
+                double rhs = path.ssDataDelay + setupTime() - clockPeriod;
+                double weight = -rhs;
+
+                addConstraintEdge(
+                    capture,
+                    launch,
+                    weight,
+                    path.id,
+                    ConstraintKind::SETUP
+                );
+            }
+
+            if (kind == ConstraintKind::HOLD) {
+                double weight = path.ffDataDelay - holdTime();
+
+                addConstraintEdge(
+                    launch,
+                    capture,
+                    weight,
+                    path.id,
+                    ConstraintKind::HOLD
+                );
+            }
+        }
+    }
+
     /* ----------------------------
      * Target helper
      * ----------------------------

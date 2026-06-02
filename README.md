@@ -150,3 +150,22 @@ x[to] <= x[from] + weight
 - 將勝出者的 `operations` 正式 Commit 到主程式的 `DesignDB`
 - 利用 DFS (深度優先搜尋) 走訪修改後的 Clock Tree
 - 匯出符合比賽規定格式的 `modified_clk_tree.structure`
+
+## SPFA.h README
+
+由於把SS和FF分開比較好做，我在ds.h加了個buildConstraintGraph(ConstraintKind kind)
+原本定義
+hold:
+x_capture - x_launch <= FF_data_delay - Thold = weight
+edge:
+launch -> capture
+
+但考量到縮小 x_capture 比增加 x_launch 難的多，我將其改成
+x_launch - x_capture >= -weight
+edge:
+capture -> launch
+
+在固定 x_capture 的情況下，藉由增加 x_launch 來符合條件
+(我沒有改原本的定義，只是在buildConstraintGraph中的from和to交換而已)
+
+

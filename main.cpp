@@ -1,6 +1,7 @@
 #include "ds.h"
 #include "ps.h"
 #include "output.h"
+#include "SPFA.h"
 
 #include <iostream>
 #include <string>
@@ -33,7 +34,9 @@ int main(int argc,char* argv[])
     //----------------------------------
     // Step 2 Critical-Path SPFA Target Scheduling
     //----------------------------------
-
+    SPFA::spfa(
+        db
+    );
 
     //----------------------------------
     // Step 3 Bounded Bottom-Up DP
