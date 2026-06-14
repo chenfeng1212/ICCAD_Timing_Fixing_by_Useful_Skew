@@ -1,7 +1,8 @@
 #include "ds.h"
 #include "ps.h"
-#include "output.h"
 #include "SPFA.h"
+#include "clk_tree_dp.h"
+#include "Evaluator.h"
 
 #include <iostream>
 #include <string>
@@ -10,15 +11,12 @@ using namespace skew;
 using namespace std;
 
 int main(int argc,char* argv[])
-//int main()
 {
     if(argc != 3)
         return 1;
 
     string testcaseDir = argv[1];
     string outputFile  = argv[2];
-    /*string testcaseDir = "testcase0";
-    string outputFile = "testcase0/modified_clk_tree.txt";//要改成structure*/
 
     DesignDB db;
 
@@ -41,21 +39,31 @@ int main(int argc,char* argv[])
     //----------------------------------
     // Step 3 Bounded Bottom-Up DP
     //----------------------------------
+    double lambda = 0.005;
+    int topK = 100;
+    double bucketPrecision = 0.0001;
+    int bucketKeep = 20;
 
+    ClkTreeDP dp(
+        db,
+        lambda,
+        topK,
+        bucketPrecision,
+        bucketKeep,
+        testcaseDir
+    );
+
+    auto rootCandidates = dp.RunDP(db.rootId);
 
     //----------------------------------
-    // Step 4 Root Top-K
+    // Step 4 Root Top-K + Output
     //----------------------------------
 
+    Evaluator evaluator(db);
 
-    
-    //----------------------------------
-    // Step 5 Output
-    //----------------------------------
-
-    writeClockTree(
-        outputFile,
-        db
+    evaluator.runTopKEvaluationAndOutput(
+        rootCandidates,
+        outputFile
     );
 
     return 0;

@@ -3,10 +3,15 @@
 
 #include "ds.h"
 #include <queue>
+#include <fstream>
+#include <iomanip>
+#include <iostream>
+
 namespace skew {
     namespace SPFA {
-        inline void spfa(DesignDB db){
-            
+        inline void spfa(DesignDB& db){
+            //Timer timer("SPFA");
+            //std::cout << "into SPFA" << std::endl;
             int ffsize=db.ffs.size();
 
             std::vector<int> times;
@@ -86,7 +91,15 @@ namespace skew {
                     }
                 }
             }
+            
+            // add calculate target shift
+            for(auto& FF : db.ffs){
+                FF.targetShiftSS =
+                    FF.targetArrivalSS - FF.clkSS;
 
+                FF.targetShiftFF =
+                    FF.targetArrivalFF - FF.clkFF;
+            }
         }
     }
 }

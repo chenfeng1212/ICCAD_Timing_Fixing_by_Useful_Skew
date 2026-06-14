@@ -10,7 +10,10 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <iostream>
 
+#include <chrono>
+using namespace std;
 /*
  * ds.h
  * Data structures for:
@@ -23,6 +26,27 @@
  * 4. Timing path table
  * 5. Basic helper functions for slack / arrival time / critical path graph
  */
+
+// add timer to record execute time
+class Timer {
+public:
+    Timer(const std::string& name)
+        : name(name),
+          start(chrono::high_resolution_clock::now()) {}
+
+    ~Timer() {
+        auto end = chrono::high_resolution_clock::now();
+        auto t = chrono::duration_cast<chrono::milliseconds>(
+                     end - start).count();
+
+        std::cout << name << " : "
+             << t << " ms\n";
+    }
+
+private:
+    std::string name;
+    chrono::high_resolution_clock::time_point start;
+};
 
 namespace skew {
 
@@ -263,6 +287,44 @@ struct Operation {
     double areaDelta = 0.0;
     double ssDelayDelta = 0.0;
     double ffDelayDelta = 0.0;
+
+    //add
+    static Operation NoOp(int nodeId){
+        Operation op;
+        
+        op.type = OperationType::NONE;
+        op.nodeId = nodeId;
+
+        return op;
+    }
+
+    static Operation Resize(int nodeId, int oldCellId, int newCellId, double areaDelta, double ssDelta, double ffDelta){
+        Operation op;
+
+        op.type = OperationType::RESIZE_BUFFER;
+        op.nodeId = nodeId;
+        op.oldCellId = oldCellId;
+        op.newCellId = newCellId;
+        op.areaDelta = areaDelta;
+        op.ssDelayDelta = ssDelta;
+        op.ffDelayDelta = ffDelta;
+
+        return op;
+    }
+
+    static Operation Insert(int parentId, int childId, int newCellId, double areaDelta, double ssDelta, double ffDelta){
+        Operation op;
+
+        op.type = OperationType::INSERT_BUFFER;
+        op.insertParentId = parentId;
+        op.insertChildId = childId;
+        op.newCellId = newCellId;
+        op.areaDelta = areaDelta;
+        op.ssDelayDelta = ssDelta;
+        op.ffDelayDelta = ffDelta;
+
+        return op;
+    }
 };
 
 struct DPState {
@@ -273,6 +335,11 @@ struct DPState {
     double estimatedGain = 0.0;
 
     std::vector<Operation> operations;
+    
+    //add
+    double sssumTargetShift = 0.0;
+    double ffsumTargetShift = 0.0;
+    int ffCount = 0;
 };
 
 /* ============================================================
