@@ -168,4 +168,133 @@ capture -> launch
 在固定 x_capture 的情況下，藉由增加 x_launch 來符合條件
 (我沒有改原本的定義，只是在buildConstraintGraph中的from和to交換而已)
 
+## clk_tree_dp.h README
 
+`clk_tree_dp.h`定義本專案step 3的 Bottom-Up Dynamic Programming (DP) 。
+這一步主要是對 Clock Tree 進行優化，透過調整 Clock Buffer 的配置來改善 Timing 表現。
+
+目前支援三種操作：
+
+NoOp：不做修改
+Resize：更換 Buffer Cell
+Insert：插入新的 Buffer
+
+DP 會由 FF 葉節點往上遞迴計算，在每個節點保留較佳的候選解，最後於 Root 取得最佳修改方案。
+
+### 演算法流程
+```mermaid
+graph TD
+    A[FF Leaf] --> B[Merge Children]
+    B --> C["Expand
+    (NoOP / Resize / Insert)"]
+    C --> D[Evaluate]
+    D --> E[Prune]
+    E --> F[Return States]
+```
+
+### DP State
+每個候選解以 `DPState` 表示。
+
+主要紀錄：
+
+- `ssDelayDelta`：SS Corner 延遲變化量。
+- `ffDelayDelta`：FF Corner 延遲變化量。
+- `areaDelta`：面積變化量。
+- `sssumTargetShift`：所有 FF 的 SS Target Shift 總和。
+- `ffsumTargetShift`：所有 FF 的 FF Target Shift 總和。
+- `ffCount`：此 State 包含的 FF 數量。
+- `estimatedGain`：評分結果。
+- `operations`：紀錄所有修改操作。
+
+### Functions
+
+#### Leaf Initialization
+當節點為 FF 時建立初始狀態：
+
+Delay Change = 0
+Area Change = 0
+將 FF 的 Target Shift 存入 State
+ffCount = 1
+
+作為 DP 的起始狀態。
+
+#### Merge
+將多個Child的DP結果合併。
+
+- TargetShift：直接加總。
+    `sumTargetShift = ChildA + ChildB`
+- Delay：使用加權平均。
+    `Delay = (DelayA × CountA + DelayB × CountB) / TotalCount`
+- Area：直接累加。
+    `Area = AreaA + AreaB`
+- Operations：將兩個Child的操紀錄合併。
+- *Merge之後會先做一次排序（通過EstimatedGain），避免候選解數量爆炸。*
+
+#### Expand
+Merge完成後，對每個State嘗試不同修改方式。
+
+- 1. NoOP
+    維持原本buffer不變。
+    用途：保留原始解，作為其他操作的比較基準。
+
+- 2. Resize
+    嘗試將目前Buffer換成Library中其他合法Cell。
+    更新：SS Dela, FF Delay, Area，並記錄Resize Operation。
+
+- 3. Insert Buffer
+    在節點與其Parent之間插入新的Buffer。
+    從
+    ```mermaid
+    graph TD
+    A{Parent} --> B{U}
+    ```
+    變成
+    ```mermaid
+    graph TD
+    A{Parent} --> B(New Buffer)
+    B --> C{U}
+    ```
+    更新：SS Dela, FF Delay, Area，並記錄Resize Operation。
+- *三種操作之後也會先做一次排序（通過EstimatedGain），避免候選解數量爆炸。*
+
+#### Evaluation
+每個State會計算一個分數(`EstimatedGain`)。
+目前使用：
+```
+Error = |TargetSS - DelaySS| + 3 ×|TargetFF - DelayFF|
+```
+再加上面積成本：
+```
+Gain = -(Error + λ × Area)
+```
+其中：SS 為主要優化目標，FF 次要考量，λ 為面積權重。
+Gain 越大表示解越好。
+
+#### Pruning
+為避免State數量爆炸，使用三層Pruning。
+- Pareto Pruning
+    刪除明顯較差的State。
+    若State A的Error更小，SS誤差更小，則視為支配(Dominate) State B。
+    
+- Bucket Pruning
+    依據SS Delay分桶：
+    ```
+    Bucket = round (SSDelay / Precision)
+    ```
+    每個Bucket只保留前幾名解。
+    參數：
+    ```
+    bucketPrecision
+    bucketKeep
+    ```
+- Top-K Pruning
+    最後依照Gain排序。
+    只保留 `topK` 個最佳解。
+    
+#### Important Parameter（重要參數）
+| 參數 | 功能 |
+|:--|:--|
+| lambda | 面積懲罰權重 |
+| topK | 每個節點保留的最大State數量 |
+| bucketPrecision | Bucket分桶精度 |
+| bucketKeep | 每個Bucket保留數量 |
