@@ -5,11 +5,14 @@
 #include <string>
 #include <algorithm>
 
-// 定義權重劇本
+// 定義權重劇本 (對齊官方評分公式的 α / β / γ)
+//   w_tns  : TNS 改善權重 (setup + hold 兩個 corner 一起)
+//   w_wns  : WNS 改善權重 (setup + hold 兩個 corner 一起)
+//   w_area : 面積縮減權重 (官方明示佔比低)
 struct WeightScenario {
-    double alpha;
-    double beta;
-    double gamma;
+    double w_tns;
+    double w_wns;
+    double w_area;
 };
 
 class Evaluator {
@@ -74,13 +77,28 @@ public:
             
             // 2. 多情境投票
             best_candidate_idx = selectRobustWinner(
-                candidate_scores, original_tns_ss, original_tns_ff, original_area
+                candidate_scores,
+                original_tns_ss, original_wns_ss,
+                original_tns_ff, original_wns_ff,
+                original_area
             );
             // output best candidate's information
             /*dumpCandidateScore(candidate_scores, root_candidates, best_candidate_idx,
                 original_tns_ss, original_wns_ss, original_tns_ff, original_wns_ff, original_area, fout
             );*/
+
+#ifdef BENCH
+            // ---- 報告用量測: 同一組候選解上，比較「舊選解」與「新選解」各自的結果 ----
+            benchDump(root_candidates, candidate_scores, best_candidate_idx,
+                      original_wns_ss, original_tns_ss,
+                      original_wns_ff, original_tns_ff, original_area);
+#endif
         }
+#ifdef BENCH
+        else {
+            std::cerr << "BENCH_SINGLE," << root_candidates.size() << "\n";
+        }
+#endif
 
         //cout << "choose candidate: " << best_candidate_idx << "\n";
         // 3. 正式套用最佳解到 Main DB
@@ -197,56 +215,147 @@ private:
         return summary;
     }
 
-    // 多情境投票機制
-    int selectRobustWinner(
-        const std::vector<skew::ScoreSummary>& scores, 
-        double orig_tns_ss, double orig_tns_ff, double orig_area) 
+    // 單一權重劇本下，計算某候選人的正規化分數
+    //   每一項都用「相對原始值的改善比例」正規化 (0 = 沒改善, 1 = 完全修好)，
+    //   讓 TNS / WNS / Area 三個量級不同的指標可以放在同一把尺上加權比較。
+    //   註: 當原始值為 0 (該 corner 本來就沒違例) 時，該項對所有候選人皆為常數 0，
+    //       不影響同一劇本內的排名，可安全略過。
+    double scoreOneScenario(
+        const skew::ScoreSummary& sc, const WeightScenario& w,
+        double orig_tns_ss, double orig_wns_ss,
+        double orig_tns_ff, double orig_wns_ff,
+        double orig_area) const
     {
-        // 建立多種可能的隱藏權重劇本
+        double t_tns_ss = (orig_tns_ss < 0) ? (1.0 - sc.tnsSS / orig_tns_ss) : 0.0;
+        double t_tns_ff = (orig_tns_ff < 0) ? (1.0 - sc.tnsFF / orig_tns_ff) : 0.0;
+        double t_wns_ss = (orig_wns_ss < 0) ? (1.0 - sc.wnsSS / orig_wns_ss) : 0.0;
+        double t_wns_ff = (orig_wns_ff < 0) ? (1.0 - sc.wnsFF / orig_wns_ff) : 0.0;
+        double t_area   = (orig_area  > 0) ? (1.0 - sc.totalArea / orig_area) : 0.0;
+
+        // 對齊官方公式: α·(TNS_SS+TNS_FF) + β·(WNS_SS+WNS_FF) + γ·Area
+        return w.w_tns  * (t_tns_ss + t_tns_ff)
+             + w.w_wns  * (t_wns_ss + t_wns_ff)
+             + w.w_area * (t_area);
+    }
+
+    // 多情境投票機制 (Borda 計分: 每個劇本內前三名分別得 3 / 2 / 1 分，累加取總分最高者)
+    int selectRobustWinner(
+        const std::vector<skew::ScoreSummary>& scores,
+        double orig_tns_ss, double orig_wns_ss,
+        double orig_tns_ff, double orig_wns_ff,
+        double orig_area)
+    {
+        // 隱藏權重劇本: 官方側重 slack、面積佔比低，因此所有劇本 w_area 皆壓在 0.05~0.10，
+        // 並在不確定 α:β 真實比例的前提下，涵蓋 TNS 主導 / WNS 主導 / 兩者均衡多種切分。
         std::vector<WeightScenario> scenarios = {
-            {0.33, 0.33, 0.34}, // 平均
-            {0.45, 0.45, 0.10}, // Timing 優先
-            {0.60, 0.20, 0.20} // SS 優先
-            //{0.20, 0.60, 0.20}, // FF 優先
-            //{0.20, 0.20, 0.60}  // 面積優先
+            // {w_tns, w_wns, w_area}
+            {0.60, 0.35, 0.05}, // TNS 主導
+            {0.35, 0.60, 0.05}, // WNS 主導
+            {0.50, 0.40, 0.10}, // 均衡略偏 TNS
+            {0.45, 0.45, 0.10}, // TNS / WNS 對半
+            {0.55, 0.40, 0.05}, // slack 極重、面積極輕
         };
 
-        std::vector<int> vote_counts(scores.size(), 0);
+        // 前三名得分表
+        const double RANK_POINTS[3] = {3.0, 2.0, 1.0};
 
-        for (const auto& scenario : scenarios) {
-            double best_score = -skew::INF;
-            int winner_index = -1;
+        std::vector<double> borda_points(scores.size(), 0.0);
+        std::vector<double> score_sum(scores.size(), 0.0); // 連續分數總和，作為 Borda 平手時的細分依據
 
+        for (const auto& w : scenarios) {
+            // 算出此劇本下每個候選人的分數
+            std::vector<std::pair<double, int>> ranked; // (score, candidateIdx)
+            ranked.reserve(scores.size());
             for (size_t i = 0; i < scores.size(); ++i) {
-                const auto& sc = scores[i];
-                
-                double term_ss = (orig_tns_ss < 0) ? (1.0 - (sc.tnsSS / orig_tns_ss)) : 1.0;
-                double term_ff = (orig_tns_ff < 0) ? (1.0 - (sc.tnsFF / orig_tns_ff)) : 1.0;
-                double term_area = (orig_area > 0) ? (1.0 - (sc.totalArea / orig_area)) : 0.0;
-
-                double current_score = (scenario.alpha * term_ss) + 
-                                       (scenario.beta * term_ff) + 
-                                       (scenario.gamma * term_area);
-
-                if (current_score > best_score) {
-                    best_score = current_score;
-                    winner_index = i;
-                }
+                double s = scoreOneScenario(
+                    scores[i], w,
+                    orig_tns_ss, orig_wns_ss,
+                    orig_tns_ff, orig_wns_ff,
+                    orig_area
+                );
+                ranked.push_back({s, static_cast<int>(i)});
+                score_sum[i] += s;
             }
-            if (winner_index != -1) vote_counts[winner_index]++;
+
+            // 由高到低排序，前三名發 3 / 2 / 1 分
+            std::sort(ranked.begin(), ranked.end(),
+                      [](const std::pair<double,int>& a, const std::pair<double,int>& b) {
+                          return a.first > b.first;
+                      });
+            for (int r = 0; r < 3 && r < static_cast<int>(ranked.size()); ++r) {
+                borda_points[ranked[r].second] += RANK_POINTS[r];
+            }
         }
 
-        // find the highest votes
+        // 取 Borda 總分最高者；平手時以連續分數總和細分
         int final_winner_index = 0;
-        int max_votes = -1;
-        for (size_t i = 0; i < vote_counts.size(); ++i) {
-            if (vote_counts[i] > max_votes) {
-                max_votes = vote_counts[i];
-                final_winner_index = i;
+        for (size_t i = 1; i < borda_points.size(); ++i) {
+            if (borda_points[i] > borda_points[final_winner_index] ||
+                (borda_points[i] == borda_points[final_winner_index] &&
+                 score_sum[i]    >  score_sum[final_winner_index])) {
+                final_winner_index = static_cast<int>(i);
             }
         }
         return final_winner_index;
     }
+
+#ifdef BENCH
+    // ============================================================
+    //  以下僅在 -DBENCH 編譯時存在，用來產生報告用的「舊 vs 新」對照數據，
+    //  不影響正式輸出，也不更動其他模組。
+    // ============================================================
+
+    // 舊版選解邏輯: 只看 TNS + Area、贏者全拿 1 票
+    int selectRobustWinner_OLD(const std::vector<skew::ScoreSummary>& scores,
+                               double ots, double otf, double oa) {
+        const double S[3][3] = {{0.33,0.33,0.34},{0.45,0.45,0.10},{0.60,0.20,0.20}};
+        std::vector<int> votes(scores.size(), 0);
+        for (const auto& w : S) {
+            double best = -skew::INF; int wi = -1;
+            for (size_t i = 0; i < scores.size(); ++i) {
+                const auto& sc = scores[i];
+                double tss = (ots < 0) ? (1.0 - sc.tnsSS/ots) : 1.0;
+                double tff = (otf < 0) ? (1.0 - sc.tnsFF/otf) : 1.0;
+                double ta  = (oa  > 0) ? (1.0 - sc.totalArea/oa) : 0.0;
+                double cur = w[0]*tss + w[1]*tff + w[2]*ta;
+                if (cur > best) { best = cur; wi = static_cast<int>(i); }
+            }
+            if (wi != -1) votes[wi]++;
+        }
+        int fi = 0, mv = -1;
+        for (size_t i = 0; i < votes.size(); ++i) if (votes[i] > mv) { mv = votes[i]; fi = static_cast<int>(i); }
+        return fi;
+    }
+
+    // 重算某候選解的完整指標 (含違例路徑數 NVP)
+    void benchMetrics(const std::vector<skew::Operation>& ops,
+                      double& swns, double& stns, int& snvp,
+                      double& hwns, double& htns, int& hnvp, double& area) {
+        skew::DesignDB sb = db;
+        applyOperationsToDB(sb, ops);
+        sb.computeClockArrival();
+        sb.computeAllSlacks();
+        swns = stns = hwns = htns = 0.0; snvp = hnvp = 0;
+        for (const auto& p : sb.paths) {
+            if (p.setupSlack < 0) { stns += p.setupSlack; swns = std::min(swns, p.setupSlack); snvp++; }
+            if (p.holdSlack  < 0) { htns += p.holdSlack;  hwns = std::min(hwns, p.holdSlack);  hnvp++; }
+        }
+        area = sb.computeTotalBufferArea();
+    }
+
+    void benchDump(const std::vector<skew::DPState>& cands,
+                   const std::vector<skew::ScoreSummary>& scores, int newIdx,
+                   double owns_ss, double otns_ss, double owns_ff, double otns_ff, double oarea) {
+        int oldIdx = selectRobustWinner_OLD(scores, otns_ss, otns_ff, oarea);
+        double a[7], b[7]; int an[2], bn[2];
+        benchMetrics(cands[oldIdx].operations, a[0],a[1],an[0],a[2],a[3],an[1],a[4]);
+        benchMetrics(cands[newIdx].operations, b[0],b[1],bn[0],b[2],b[3],bn[1],b[4]);
+        std::cerr << "ORIG," << owns_ss << "," << otns_ss << "," << owns_ff << "," << otns_ff << "," << oarea << "\n";
+        std::cerr << "BENCH,ncand=" << cands.size() << ",oldIdx=" << oldIdx << ",newIdx=" << newIdx << "\n";
+        std::cerr << "OLD," << a[0] << "," << a[1] << "," << an[0] << "," << a[2] << "," << a[3] << "," << an[1] << "," << a[4] << "\n";
+        std::cerr << "NEW," << b[0] << "," << b[1] << "," << bn[0] << "," << b[2] << "," << b[3] << "," << bn[1] << "," << b[4] << "\n";
+    }
+#endif
 
     // recursive output Clock Tree
     void exportModifiedClockTree(const std::string& filename) {
