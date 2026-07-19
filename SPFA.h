@@ -98,7 +98,7 @@ namespace skew {
                     FF.targetArrivalSS - FF.clkSS;
 
                 FF.targetShiftFF =
-                    FF.targetArrivalFF - FF.clkFF;
+                    FF.targetArrivalFF - FF.clkFF;                
             }
         }
     }

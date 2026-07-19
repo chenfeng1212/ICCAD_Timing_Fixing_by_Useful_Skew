@@ -8,6 +8,7 @@
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 #include <iostream>
@@ -73,6 +74,24 @@ enum class OperationType {
     NONE,
     RESIZE_BUFFER,
     INSERT_BUFFER
+};
+
+//add
+struct NodeOperationState{
+    bool modified = false;//modified=true代表已經對這個進行過操作
+    OperationType op_type = OperationType::NONE;
+    NodeOperationState() = default;
+    NodeOperationState(bool m1, OperationType op): modified(m1), op_type(op){}
+};
+
+enum class PathRole{
+    CAPTURE,
+    LAUNCH
+};
+
+struct PathInfo{
+    int pathId;
+    PathRole pathRole;
 };
 
 /* ============================================================
@@ -213,6 +232,12 @@ struct FFInfo {
     // Timing paths connected to this FF
     std::vector<int> launchPaths;
     std::vector<int> capturePaths;
+
+    // 0712
+    double setupViolationWeight = 0.0;
+    double holdViolationWeight = 0.0;
+    int setupViolationCount = 0;
+    int holdViolationCount = 0;
 };
 
 /* ============================================================
@@ -245,6 +270,12 @@ struct TimingPath {
                hasSS &&
                hasFF;
     }
+
+    //add
+    int LCAnode = INVALID_ID;
+
+    vector<int>launchBuffers;
+    vector<int>captureBuffers;
 };
 
 /* ============================================================
@@ -283,6 +314,8 @@ struct Operation {
     int insertParentId = INVALID_ID;
     int insertChildId = INVALID_ID;
     std::string newBufferName;
+    //add
+    int insertCount = 0; // 一次大幅修好critical path插入的buffer數（假設slack是最大delay的十倍，一次修好需插入9個buffer）
 
     double areaDelta = 0.0;
     double ssDelayDelta = 0.0;
@@ -312,10 +345,12 @@ struct Operation {
         return op;
     }
 
-    static Operation Insert(int parentId, int childId, int newCellId, double areaDelta, double ssDelta, double ffDelta){
+    static Operation Insert(int parentId, int childId, int newCellId, int insertCount, double areaDelta, double ssDelta, double ffDelta){
         Operation op;
 
         op.type = OperationType::INSERT_BUFFER;
+        op.nodeId = childId;
+        op.insertCount = insertCount;
         op.insertParentId = parentId;
         op.insertChildId = childId;
         op.newCellId = newCellId;
@@ -340,6 +375,35 @@ struct DPState {
     double sssumTargetShift = 0.0;
     double ffsumTargetShift = 0.0;
     int ffCount = 0;
+
+    //add after alpha test
+    double ssmaxTargetShift = 0.0;
+    double ffmaxTargetShift = 0.0;
+    double ssminTargetShift = 0.0;
+    double ffminTargetShift = 0.0;
+
+    //try sumdelaydelta
+    double sssumDelayDelta = 0.0;
+    double ffsumDelayDelta = 0.0;
+    //以上的部分應該都不會用到，sum和average的方式偏向優化整體趨勢，有點難優化單獨negative slack
+
+    // change to beam search
+    double setupViolationWeight = 0.0;
+    double holdViolationWeight = 0.0;
+
+    int setupViolationCount = 0;
+    int holdViolationCount = 0;
+
+    //BeamSearch
+    //每條 path 目前預估 slack 改變量
+
+    vector<double> pathSlackDeltaSS;
+    vector<double> pathSlackDeltaFF;
+
+    // 同一輪避免重複修改 node
+    std::vector<NodeOperationState> nodeOperationState;
+
+    double totalAreaDelta = 0.0;
 };
 
 /* ============================================================
@@ -380,6 +444,13 @@ struct DesignDB {
 
     double clockPeriod = 0.0;
     double originalArea = 0.0;
+
+    //change to beam search
+    vector <vector<int>> subtreeFFs;
+    vector <vector<PathInfo>> FFtoPaths; 
+
+    //add
+    int newBufferCount = 0;
 
     /* ----------------------------
      * Basic timing constants
@@ -782,6 +853,69 @@ struct DesignDB {
                 ffs[capture].capturePaths.push_back(i);
             }
         }
+        rebuildPathClockInfo();
+    }
+
+    //add
+    void rebuildPathClockInfo(){
+        for (auto& path : paths)
+        {
+            path.launchBuffers.clear();
+            path.captureBuffers.clear();
+
+            int launchNode =
+                ffs[path.launchFF].treeNodeId;
+
+            int captureNode =
+                ffs[path.captureFF].treeNodeId;
+
+            path.LCAnode =
+                findLCA(launchNode, captureNode);
+
+            path.launchBuffers =
+                collectBuffersToLCA(
+                    launchNode,
+                    path.LCAnode);
+
+            path.captureBuffers =
+                collectBuffersToLCA(
+                    captureNode,
+                    path.LCAnode);
+        }
+    }
+
+    int findLCA(int nodeA, int nodeB){
+        unordered_set<int> ancestors;
+
+        while(nodeA != INVALID_ID){
+            ancestors.insert(nodeA);
+            nodeA = tree[nodeA].parent;
+        }
+        while(nodeB != INVALID_ID){
+            if (ancestors.count(nodeB))
+                return nodeB;
+            nodeB = tree[nodeB].parent;
+        }
+
+        return INVALID_ID;
+    }
+
+    vector<int> collectBuffersToLCA(int startNode, int LCAnode){
+        vector<int> result;
+
+        int node = startNode;
+
+        while(node != LCAnode){
+            node = tree[node].parent;
+            if (node == INVALID_ID)
+                break;
+            if (node == LCAnode)
+                break;
+            if (tree[node].type == NodeType::BUFFER){
+                result.push_back(node);
+            }
+        }
+        return result;
     }
 
     /* ----------------------------

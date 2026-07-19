@@ -35,14 +35,18 @@ namespace skew{
         m_bucketPrecision(bucketPrecision),
         m_bucketKeep(bucketKeep)
         {
-            //m_DebugExpand.open(testcase + "/expand_debug.txt");
-            //m_DebugPrune.open(testcase + "/prune_debug.txt");
             //m_check.open(testcase + "/check.txt");
         }
 
         DPStates RunDP(const int rootId){
             //Timer timer("DP");
             //cout << "into RunDP" << endl;
+            
+            m_db.subtreeFFs.resize(m_db.tree.size());
+            collectSubtreeFF(rootId);
+
+            cout << "nodes size = " << m_db.tree.size() << endl;
+            m_db.originalArea = m_db.computeTotalBufferArea();
             DPStates states = DP(rootId);
             if (states.empty()){
                 throw runtime_error("No solution");
@@ -63,141 +67,6 @@ namespace skew{
 
         //debug
         std::ofstream m_check;
-        std::ofstream m_DebugExpand;
-        std::ofstream m_DebugPrune;
-
-    /*
-        void Debug_NoOp(const TreeNode& u, DPState& newState){
-            m_DebugExpand.open("testcase0/expand_debug.txt");
-            m_DebugExpand
-                << "Node "
-                << u.name
-                << "\n";
-
-            m_DebugExpand
-                << "Operation : NoOp\n";
-
-            m_DebugExpand
-                << "SS Delay = "
-                << newState.ssDelayDelta
-                << "\n";
-
-            m_DebugExpand
-                << "FF Delay = "
-                << newState.ffDelayDelta
-                << "\n";
-
-            m_DebugExpand
-                << "Gain = "
-                << newState.estimatedGain
-                << "\n\n";
-        }
-        
-        void Debug_Resize(const TreeNode& u, DPState& newState, const CellLib& oldCell, const CellLib& newCell,
-            double deltaSS, double deltaFF, double deltaArea)
-            {
-            m_DebugExpand
-                << "Node "
-                << u.name
-                << "\n";
-
-            m_DebugExpand
-                << "Resize "
-                << oldCell.name
-                << " -> "
-                << newCell.name
-                << "\n";
-
-            m_DebugExpand
-                << "DeltaSS = "
-                << deltaSS
-                << "\n";
-
-            m_DebugExpand
-                << "DeltaFF = "
-                << deltaFF
-                << "\n";
-
-            m_DebugExpand
-                << "DeltaArea = "
-                << deltaArea
-                << "\n";
-
-            m_DebugExpand
-                << "Gain = "
-                << newState.estimatedGain
-                << "\n\n";
-        }
-
-        void DumpState(
-            std::ostream& os,
-            const DPState& state
-        )
-        {
-            os << "Gain = "
-            << state.estimatedGain
-            << "\n";
-
-            os << "SS Delay Delta = "
-            << state.ssDelayDelta
-            << "\n";
-
-            os << "FF Delay Delta = "
-            << state.ffDelayDelta
-            << "\n";
-
-            os << "Area Delta = "
-            << state.areaDelta
-            << "\n";
-
-            os << "Operations:\n";
-
-            for(size_t i=0;i<state.operations.size();i++)
-            {
-                const auto& op =
-                    state.operations[i];
-
-                os << "[" << i << "] ";
-
-                if(op.type ==
-                OperationType::NONE)
-                {
-                    os << "NoOp";
-                }
-                else if(op.type ==
-                        OperationType::RESIZE_BUFFER)
-                {
-                    os << "Resize";
-
-                    os << " node="
-                    << m_nodes[op.nodeId].name;
-
-                    os << " "
-                    << m_db.getCell(op.oldCellId).name;
-
-                    os << " -> "
-                    << m_db.getCell(op.newCellId).name;
-                }
-                else if(op.type ==
-                        OperationType::INSERT_BUFFER)
-                {
-                    os << "Insert";
-
-                    os << " parent="
-                    << m_nodes[op.insertParentId].name;
-
-                    os << " buffer="
-                    << op.newBufferName;
-                }
-
-                os << "\n";
-            }
-
-            os << "\n";
-        }
-        
-    */
-        // debug end
 
         //----------------------------------
         // Main DP
@@ -206,11 +75,11 @@ namespace skew{
         DPStates DP(const int nodeId){
             const TreeNode& u = m_nodes[nodeId];
             string name = u.name;
-            //m_DebugPrune << "====================================\n";
-            //m_DebugPrune << "Node: " << name << endl;
+            //m_check << "====================================\n";
+            //m_check << "Node: " << name << endl;
             // if u is FF, return leaf state
             if (u.isFF()){
-                return InitializeLeaf(name);
+                return InitializeLeaf(u);
             }
             
             vector<DPStates>childStates = {};
@@ -219,18 +88,16 @@ namespace skew{
                 childStates.push_back(DP(child));
             }
 
+            //m_check << "Merge" << endl;
             //merge
-            //m_DebugPrune << "into get child DP, size = " << childStates.size() << endl;
-            //m_DebugPrune << "into get Merge, ";
             DPStates mergedStates = MergeChildren(childStates);
-            //m_DebugPrune << "size = " << mergedStates.size() << endl;
 
             // avoid memory out of range
-            sort(mergedStates.begin(), mergedStates.end(), [](const DPState& a, const DPState& b){
+            /*sort(mergedStates.begin(), mergedStates.end(), [](const DPState& a, const DPState& b){
                 return a.estimatedGain > b.estimatedGain;
             });
             if (mergedStates.size() > 200)
-                mergedStates.resize(200);
+                mergedStates.resize(200);*/
 
             // return if u is rootId (cannot do any expand operations)
             if (u.id == m_db.rootId){
@@ -239,8 +106,7 @@ namespace skew{
             //m_check << "After merged: " << name << ": " << mergedStates.size() << endl;
 
             DPStates expanded;
-            //m_DebugPrune << "into get expand, ";
-
+            //m_check << "Expand" << endl;
             for (const auto& state : mergedStates){
                 if (u.isBuffer()){
                     auto noOpStates = ExpandNoOp(state, u, m_lambda);
@@ -250,34 +116,64 @@ namespace skew{
                     auto resizeStates = ExpandResize(state, u, m_lambda);
 
                     expanded.insert(expanded.end(), resizeStates.begin(), resizeStates.end());
-                }
+                
 
                 // insert buffer between node u and parent of u
-                auto insertStates = ExpandInsert(state, u, m_lambda);
+                //auto insertStates = ExpandInsert(state, u, m_lambda);
 
-                expanded.insert(expanded.end(), insertStates.begin(), insertStates.end());
+                //expanded.insert(expanded.end(), insertStates.begin(), insertStates.end());
+                //change to insert buffer between node u and it's child
+                    for (auto& child : u.children) {
+                        auto insertStates = ExpandInsert(state, u, m_lambda);
+                        expanded.insert(expanded.end(), insertStates.begin(), insertStates.end());
+                    }
+                }
 
                 // use sort will keep better candidates states (prune didn't work well)
                 // expanded = Prune(expanded, 500, m_bucketPrecision, m_bucketKeep);
                 sort(expanded.begin(), expanded.end(), [](const DPState& a, const DPState& b){
                     return a.estimatedGain > b.estimatedGain;
                 });
-                if (expanded.size() > 200)
-                    expanded.resize(200);
+                /*if (expanded.size() > 200)
+                    expanded.resize(200);*/
             }
 
-            //m_DebugPrune << "size = " << expanded.size() << endl;
             return Prune(expanded, m_topK, m_bucketPrecision, m_bucketKeep);
         }
-    
+
+        // collect subtree FFs
+        void collectSubtreeFF(const int nodeId)
+        {
+            m_db.subtreeFFs[nodeId].clear();
+            const TreeNode& node = m_db.tree[nodeId];
+
+            if(node.type == NodeType::FF)
+            {
+                m_db.subtreeFFs[nodeId].push_back(node.ffId);
+                return;
+            }
+
+            for(int childId : node.children)
+            {
+                collectSubtreeFF(childId);
+
+                m_db.subtreeFFs[nodeId].insert(
+                    m_db.subtreeFFs[nodeId].end(),
+                    m_db.subtreeFFs[childId].begin(),
+                    m_db.subtreeFFs[childId].end()
+                );
+            }
+
+            sort(m_db.subtreeFFs[nodeId].begin(), m_db.subtreeFFs[nodeId].end());
+        }
 
         //----------------------------------
         // Leaf
         //----------------------------------
 
-        DPStates InitializeLeaf(const string& name){
+        DPStates InitializeLeaf(const TreeNode& u){
             DPState state;
-            int ffId = m_db.getFFId(name);
+            int ffId = m_db.getFFId(u.name);
             const FFInfo& ff = m_db.ffs[ffId];
             state.ssDelayDelta = 0.0;
             state.ffDelayDelta = 0.0;
@@ -285,10 +181,19 @@ namespace skew{
 
             state.sssumTargetShift = ff.targetShiftSS;
             state.ffsumTargetShift = ff.targetShiftFF;
+            //m_check << "targetShiftSS = " << ff.targetShiftSS << ", targetshiftFF = " << ff.targetShiftFF << endl;
             state.ffCount = 1;
 
             state.estimatedGain = 0.0;
 
+            //add
+            state.ssmaxTargetShift = ff.targetShiftSS;
+            state.ffmaxTargetShift = ff.targetShiftFF;
+            state.ssminTargetShift = ff.targetShiftSS;
+            state.ffminTargetShift = ff.targetShiftFF;
+
+            //state.sssumDelayDelta = 0.0;
+            //state.ffsumDelayDelta = 0.0;
             return {state};
         }
 
@@ -308,6 +213,21 @@ namespace skew{
             C.operations.insert(C.operations.end(), A.operations.begin(), A.operations.end());
             C.operations.insert(C.operations.end(), B.operations.begin(), B.operations.end());
 
+            //add
+            C.ssmaxTargetShift = max(A.ssmaxTargetShift, B.ssmaxTargetShift);
+            C.ffmaxTargetShift = max(A.ffmaxTargetShift, B.ffmaxTargetShift);
+            C.ssminTargetShift = min(A.ssminTargetShift, B.ssminTargetShift);
+            C.ffminTargetShift = min(A.ffminTargetShift, B.ffminTargetShift);
+
+            //C.sssumDelayDelta = A.sssumDelayDelta + B.sssumDelayDelta;
+            //C.ffsumDelayDelta = A.ffsumDelayDelta + B.ffsumDelayDelta;
+
+            //m_check << "sssumTargetshift = " << A.sssumTargetShift << " + " << B.sssumTargetShift << " = " << C.sssumTargetShift << endl;
+            //m_check << "ffsumTargetshift = " << A.ffsumTargetShift << " + " << B.ffsumTargetShift << " = " << C.ffsumTargetShift << endl;
+            //m_check << "sssumDelayDelta = " << A.sssumDelayDelta << " + " << B.sssumDelayDelta << " = " << C.sssumDelayDelta << endl;
+            //m_check << "ffsumDelayDelta = " << A.ffsumDelayDelta << " + " << B.ffsumDelayDelta << " = " << C.ffsumDelayDelta << endl;
+            //m_check << "ssDelayDelta = " << A.ssDelayDelta << " + " << B.ssDelayDelta << " = " << C.ssDelayDelta << endl;
+            //m_check << "ffDelayDelta = " << A.ffDelayDelta << " + " << B.ffDelayDelta << " = " << C.ffDelayDelta << endl;
             return C;
         }
 
@@ -373,11 +293,14 @@ namespace skew{
                 DPState newState = state;
                 newState.ssDelayDelta += deltaSS;
                 newState.ffDelayDelta += deltaFF;
+                //newState.sssumDelayDelta += deltaSS;
+                //newState.ffsumDelayDelta += deltaFF;
                 newState.areaDelta += deltaArea;
 
                 int oldCellId = m_db.getCellId(oldCell.name);
                 int newCellId = m_db.getCellId(newCell.name);
 
+                //m_check << "resize " << newCell.name << "(SS: " << deltaSS << ", FF: " << deltaFF << ")\n";
                 newState.operations.push_back(Operation::Resize(u.id, oldCellId, newCellId, deltaArea, deltaSS, deltaFF));
                 newState.estimatedGain = Evaluate(newState, lambda);
                 candidates.push_back(move(newState));
@@ -407,10 +330,13 @@ namespace skew{
                 DPState newState = state;
                 newState.ssDelayDelta += deltaSS;
                 newState.ffDelayDelta += deltaFF;
+                //newState.sssumDelayDelta += deltaSS;
+                //newState.ffsumDelayDelta += deltaFF;
                 newState.areaDelta += deltaArea;
 
+                //m_check << "insert " << newCellName << "(SS: " << deltaSS << ", FF: " << deltaFF << ")\n";
                 //Insert(int parentId, int childId, int newCellId, double areaDelta, double ssDelta, double ffDelta)
-                newState.operations.push_back(Operation::Insert(parent_Id, u_Id, newCellId, deltaArea, deltaSS, deltaFF));
+                newState.operations.push_back(Operation::Insert(parent_Id, u_Id, newCellId, 1, deltaArea, deltaSS, deltaFF));
                 newState.estimatedGain = Evaluate(newState, lambda);
 
                 candidates.push_back(move(newState));
@@ -431,9 +357,33 @@ namespace skew{
             double meanTargetFF = state.ffsumTargetShift / state.ffCount;
 
             // ssDelay >> ffDelay -> use weighted method so that the effect of ffDelay can be considered too
-            double error = abs(meanTargetSS - state.ssDelayDelta) + 3 * abs(meanTargetFF - state.ffDelayDelta); // ss > ff = area
-            double gain = -(error + lambda * state.areaDelta);
+            // double error = abs(meanTargetSS - state.ssDelayDelta) + 3 * abs(meanTargetFF - state.ffDelayDelta); // ss > ff = area
+            // double gain = -(error + lambda * state.areaDelta);
+
+            double meanErrorSS = //abs(state.sssumTargetShift - state.sssumDelayDelta);
+                abs(meanTargetSS - state.ssDelayDelta);
+
+            double meanErrorFF = //abs(state.ffsumTargetShift - state.ffsumDelayDelta);
+                abs(meanTargetFF - state.ffDelayDelta);
+
+            double maxErrorSS =
+                max(
+                    abs(state.ssmaxTargetShift - state.ssDelayDelta),
+                    abs(state.ssminTargetShift - state.ssDelayDelta)
+                );
+
+            double maxErrorFF = 
+                max(
+                    abs(state.ffmaxTargetShift - state.ffDelayDelta),
+                    abs(state.ffminTargetShift - state.ffDelayDelta)
+                );
             
+            //double error = 3.0 * meanErrorSS + 5.0 * meanErrorFF + 2.5 * maxErrorSS + 1.0 * maxErrorFF;
+            //double gain = -(3.0 * error + state.areaDelta);
+
+            double error = meanErrorSS + 3.0 * meanErrorFF;
+            double gain = -(error + 0.005 * state.areaDelta);
+            //m_check << "meanSS = " << meanErrorSS << ", meanFF = " << meanErrorFF << ", maxSS = " << maxErrorSS << ", maxFF = " << maxErrorFF << endl;
             return gain;
         }
 
@@ -447,7 +397,9 @@ namespace skew{
             
             double A_SS = abs(A.sssumTargetShift / A.ffCount - A.ssDelayDelta);
             double B_SS = abs(B.sssumTargetShift / B.ffCount - B.ssDelayDelta);
-
+            /*return (fabs(A.ssDelayDelta-B.ssDelayDelta)<0.00001 &&
+                fabs(A.ffDelayDelta-B.ffDelayDelta)<0.000001 &&
+                fabs(A.areaDelta-B.areaDelta)<0.00001);*/
             return (errorA < errorB && A_SS < B_SS);
             //return (errorA < errorB)或是return (errorA < errorB && (A_SS < B_SS || A_FF < B_FF))會只返回一個error最低的解（areadelta高，ss的tns會被優化到，但是其餘幾乎都惡化）
         }

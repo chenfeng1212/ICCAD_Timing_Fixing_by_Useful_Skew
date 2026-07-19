@@ -73,6 +73,9 @@ public:
                 // 結算成績
                 skew::ScoreSummary summary = calculateSummary(sandbox_db);
                 candidate_scores.push_back(summary);
+                
+                cout << "wns_ss = " << summary.wnsSS << ", tns_ss = " << summary.tnsSS << endl;
+                cout << "wns_ff = " << summary.wnsFF << ", tns_ff = " << summary.tnsFF << endl;
             }
             
             // 2. 多情境投票
@@ -82,6 +85,8 @@ public:
                 original_tns_ff, original_wns_ff,
                 original_area
             );
+
+            
             // output best candidate's information
             /*dumpCandidateScore(candidate_scores, root_candidates, best_candidate_idx,
                 original_tns_ss, original_wns_ss, original_tns_ff, original_wns_ff, original_area, fout
@@ -117,7 +122,7 @@ private:
 
     // 將 DPState 記錄的 operations 實際修改到 Tree 上
     void applyOperationsToDB(skew::DesignDB& target_db, const std::vector<skew::Operation>& ops) {
-        int newBufferCount = 0;
+        
         int resizecount = 0;
         for (const auto& op : ops) {
             if (op.type == skew::OperationType::RESIZE_BUFFER) {
@@ -126,32 +131,40 @@ private:
                 target_db.tree[op.nodeId].instType = target_db.getCell(op.newCellId).name;
                 resizecount += 1;
             } 
-            else if (op.type == skew::OperationType::INSERT_BUFFER) {
+            else if (op.type == skew::OperationType::INSERT_BUFFER) { // 修改成可支援insertCount的
                 // Insert: 新增 Node
                 // add new_buf_name
-                string newBufferName = "NEW_BUF_" + to_string(newBufferCount);
-                int new_node_id = target_db.addTreeNode(
-                    newBufferName, 
-                    skew::NodeType::BUFFER, 
-                    target_db.getCell(op.newCellId).name, 
-                    target_db.tree[op.insertChildId].level, // 調整 Level
-                    op.newCellId
-                );
-                //cout << "newbuffername = " << newBufferName << " ";
-                newBufferCount++;
-                
-                // 將 New Buffer 標記起來
-                target_db.tree[new_node_id].isNewBuffer = true;
+                int parent = op.insertParentId;
+                int child = op.insertChildId;
 
-                // 重新綁定 Parent 與 Child
-                replaceChildInTree(target_db, op.insertParentId, op.insertChildId, new_node_id);
-                target_db.setParent(op.insertChildId, new_node_id);
-                target_db.tree[op.insertChildId].level; // 更新下游 Level
-                updateSubtreeLevel(
-                    target_db,
-                    op.insertChildId,
-                    1
-                );
+                int prevNode = parent; // prevNode代表當前插入的buffer的上面的node
+                int newCellId = op.newCellId;
+                for (int i = 0; i < op.insertCount; i++) { //修復critical path的insert count >= 1，其餘則都 = 1
+                    string newBufferName = "NEW_BUF_" + to_string(target_db.newBufferCount);
+                    int new_node_id = target_db.addTreeNode(
+                        newBufferName, 
+                        skew::NodeType::BUFFER, 
+                        target_db.getCell(newCellId).name, 
+                        target_db.tree[child].level, // 調整 Level
+                        newCellId
+                    );
+                    //cout << "newbuffername = " << newBufferName << " ";
+                    target_db.newBufferCount++;
+                    
+                    // 將 New Buffer 標記起來
+                    target_db.tree[new_node_id].isNewBuffer = true;
+
+                    // 重新綁定 Parent 與 Child
+                    replaceChildInTree(target_db, prevNode, child, new_node_id);
+                    target_db.setParent(child, new_node_id);
+                    target_db.tree[child].level; // 更新下游 Level
+                    updateSubtreeLevel(
+                        target_db,
+                        child,
+                        1
+                    );
+                    prevNode = new_node_id;
+                }
             }
 
         }
