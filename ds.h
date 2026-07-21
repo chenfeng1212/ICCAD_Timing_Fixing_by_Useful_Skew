@@ -32,11 +32,15 @@ using namespace std;
 class Timer {
 public:
     Timer(const std::string& name)
-        : name(name),
-          start(chrono::high_resolution_clock::now()) {}
+        : name(name) {
+            reset();
+          }
 
+    void reset() {
+        start = std::chrono::steady_clock::now();
+    }
     ~Timer() {
-        auto end = chrono::high_resolution_clock::now();
+        auto end = chrono::steady_clock::now();
         auto t = chrono::duration_cast<chrono::milliseconds>(
                      end - start).count();
 
@@ -44,9 +48,19 @@ public:
              << t << " ms\n";
     }
 
+    double elapsedMs() const {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration<double, std::milli>(now - start).count();
+    }
+
+    double elapsedSec() const {
+        auto now = std::chrono::steady_clock::now();
+        return std::chrono::duration<double>(now - start).count();
+    }
+
 private:
     std::string name;
-    chrono::high_resolution_clock::time_point start;
+    chrono::steady_clock::time_point start;
 };
 
 namespace skew {
@@ -451,6 +465,10 @@ struct DesignDB {
 
     //add
     int newBufferCount = 0;
+    double critical_ss_threshold = 0.0;
+    double critical_ff_threshold = 0.0;
+    double critical_limit = 0.0;
+    int originalViolationSize = 0;
 
     /* ----------------------------
      * Basic timing constants
@@ -853,10 +871,70 @@ struct DesignDB {
                 ffs[capture].capturePaths.push_back(i);
             }
         }
-        rebuildPathClockInfo();
+        rebuildPathClockInfo(); // 建立path在clk tree會經過的buffer，分為launch和capture
     }
 
     //add
+    
+    void buildFFtoPaths(){ // 建立每個FF身上的paths，方便Greedy Search時計算operation是否會優化
+        FFtoPaths.resize(ffs.size(), {});
+
+        for(const auto& path : paths)
+        {
+            FFtoPaths[path.launchFF].push_back(
+            {
+                path.id,
+                PathRole::LAUNCH
+            });
+
+            FFtoPaths[path.captureFF].push_back(
+            {
+                path.id,
+                PathRole::CAPTURE
+            });
+        }
+    }
+
+    void InitializeSubtreeFFs(const int nodeId){ // 初始化每個node所包含的FF，方便Greedy Search時能夠根據這個node計算子樹的FF對應到path的影響
+        subtreeFFs[nodeId].clear();
+        const TreeNode& node = tree[nodeId];
+
+        if(node.type == NodeType::FF) {
+            subtreeFFs[nodeId].push_back(node.ffId);
+            return;
+        }
+
+        for(int childId : node.children) {
+            InitializeSubtreeFFs(childId);
+            
+            subtreeFFs[nodeId].insert(
+                subtreeFFs[nodeId].end(),
+                subtreeFFs[childId].begin(),
+                subtreeFFs[childId].end()
+            );
+        }
+
+        sort(subtreeFFs[nodeId].begin(), subtreeFFs[nodeId].end());
+    }
+
+    void UpdateSubtreeFFs(const int nodeId) { // 更新新加入的node的subtreeFFs
+        vector<int> subtree;
+        const auto& node = tree[nodeId];
+        for (int childId : node.children) {
+            subtree.insert(
+                subtree.end(),
+                subtreeFFs[childId].begin(),
+                subtreeFFs[childId].end()
+            );
+        }
+        if (subtreeFFs.size() < tree.size())
+            subtreeFFs.resize(tree.size());
+
+        subtreeFFs[nodeId] = std::move(subtree);
+    }
+
+
+    // 預先建立path在clk tree會經過的buffer，
     void rebuildPathClockInfo(){
         for (auto& path : paths)
         {
@@ -918,6 +996,7 @@ struct DesignDB {
         return result;
     }
 
+    
     /* ----------------------------
      * Slack calculation
      * ----------------------------
@@ -1108,6 +1187,16 @@ struct DesignDB {
         computeAllSlacks();
         updateOriginalArea();
         clearTargets();
+        //add
+        computeOriginalViolation();
+    }
+
+    void computeOriginalViolation(){
+        for (auto& path : paths) {
+                if (path.holdSlack < 0 || path.setupSlack < 0) {
+                    originalViolationSize++;
+                }
+        }
     }
 };
 

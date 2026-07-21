@@ -8,6 +8,7 @@
 #include <vector>
 #include <string>
 #include <cmath>
+#include <climits>
 #include <unordered_map>
 
 using namespace std;
@@ -40,16 +41,14 @@ struct CandidateOperation{
 struct BufferCandidate{
     int nodeId = INVALID_ID;
 
-    double maxSetupSlack = 0.0;
-    double maxHoldSlack = 0.0;
+    //double maxSetupSlack = 0.0;
+    //double maxHoldSlack = 0.0;
     double setupWeight = 0.0;
     double holdWeight = 0.0;
     double totalWeight = 0.0;
 
-    int setupViolationCount = 0;
-    int holdViolationCount = 0;
-
-    int worst_path_count = 0;
+    //int setupViolationCount = 0;
+    //int holdViolationCount = 0;
 };
 
 namespace skew{
@@ -67,28 +66,51 @@ namespace skew{
         rootId(rootId)
         {}
 
-        DPStates RunBS(){
+        DPStates RunBS(bool start_cleanMode, int critical_to_solve){
+            cleanMode = start_cleanMode;
+            double weight_violations = (cleanMode) ? 1.0 : 0.5; // weight_violations代表要看前多少%的violations來找buffercandidate
+            critical_ss_threshold = db.critical_ss_threshold;
+            critical_ff_threshold = db.critical_ff_threshold;
+            critical_limit = db.critical_limit;
             cout << "Nodes = " << nodes.size() << ", FFs = " << ffInfos.size() << endl;
-            //check_violation.open("check_violation.txt");
 
+            //check_violation.open("check_violation.txt");
             //output_candop.open("Candidates_Operations.txt");
             //output_delta.open("delta.txt");
+            
+            if (current_violations <= 2000 || cleanMode) {
+                critical_ss_threshold = 0.0;
+                critical_ff_threshold = 0.0;
+                critical_limit = -0.001;
+                weight_violations = 1.0;
+            }
+
             DPState preprocess = Preprocess();
             
-            cout << "Time 0" << endl;
-            DPStates states = BS(preprocess);
+            //cout << "Time 0" << endl;
+            DPStates states = BS(preprocess, weight_violations, critical_to_solve);
 
-            //int cycle_count = (nodes.size() - ffInfos.size()) / 100;
-            for (int i = 0; i < 10; i++){
-                cout << "Time " << i+1 << endl;
-                check_violation << "\n" << i+1 << endl;
-                states = BS(states[0]);
-                if (states[0].operations.size() == 0)
+            for (int i = 0; i < 10; i++){ // BS()跑十遍就將operations實際操作在clk tree
+                //cout << "Time " << i+1 << "\n";
+                //cout << "weight_violations = " << weight_violations << ", critical_to_solve = " << critical_to_solve << endl;
+                //check_violation << "\n" << i+1 << endl;
+                if (weight_violations < 1.0) // 增加考慮的violations，避免很小的slack總是被忽略
+                    weight_violations += 0.05;
+                states = BS(states[0], weight_violations, critical_to_solve);
+
+                if (states[0].operations.size() == 0) // 代表已經找不到可操作的空間（通常是ss和ff已經為零了）
                     break;
             }
             //output_operations(states[0]);
+
+            //applyoperation
+            applyOperationsToDB(db, states[0].operations);
+            
+            weight_violations = 0.5;
+            
             return states;
         }
+
     private:
         //DesignDB
         DesignDB& db;
@@ -97,9 +119,15 @@ namespace skew{
         const vector<FFInfo>& ffInfos;
         int rootId;
 
-        unordered_map<int, BufferCandidate> bufferCandidates;
-
-        //SolutionState solution;
+        unordered_map<int, BufferCandidate> bufferCandidates;// 根據violation paths在clk tree上會經過的buffer計算buffer身上的權重，權重越重代表身上有越多violation paths經過，修改/插入會能優化很多
+        
+        int max_SS_buffer = 0;// SSDelay最大的buffer在cellLibs裡的順序，主要用在修critical paths
+        int max_FF_buffer = 0;// FFDelay最大的buffer在cellLibs裡的順序，主要用在修critical paths
+        double critical_ss_threshold;// 修復setup的目標值
+        double critical_ff_threshold;// 修復hold的目標值
+        double critical_limit; // 修復setup/hold可以接受另一個corner惡化的極限
+        bool cleanMode = false;// cleanMode=true代表有很多很小的slack，所以critical_threshold的值可以修改為>=0，直接修好
+        int current_violations = INT_MAX;// 目前violation paths的數量
 
         //debug
         ofstream check_violation;
@@ -211,13 +239,13 @@ namespace skew{
                     << "Total Weight : "
                     << candidate->totalWeight << "\n";
 
-                check_buffer
-                    << "Setup Violation Count : "
-                    << candidate->setupViolationCount << "\n";
+                //check_buffer
+                //    << "Setup Violation Count : "
+                //    << candidate->setupViolationCount << "\n";
 
-                check_buffer
-                    << "Hold Violation Count : "
-                    << candidate->holdViolationCount << "\n";
+                //check_buffer
+                //    << "Hold Violation Count : "
+                //    << candidate->holdViolationCount << "\n";
 
                 check_buffer << "\n";
             }
@@ -284,82 +312,45 @@ namespace skew{
             }
         }
 
-        DPStates BS(DPState& state){
+        DPStates BS(DPState& state, double weight_violations, int critical_to_solve){
             auto violations = UpdateViolationList(state);
             //output_violation(violations); // 輸出前20個critical paths
-            CriticalRepair(state, violations);
+            CriticalRepair(state, violations, critical_to_solve);
             //update sorted violation paths
-            cout << "Repaired_critical, ";
-            violations = UpdateViolationList(state);// 將前10個critical paths進行優化
-            //output_violation(violations); // 輸出解決原本最critical的10個paths後的前20個critical paths（基本上會變成tns惡化，但後面會慢慢修好）
-            
+            //cout << "Repaired_critical, ";
+            violations = UpdateViolationList(state);// 將前15個critical paths進行優化
+            //output_violation(violations); // 修復critical paths後可能會變成tns惡化，但後面會慢慢修好
+            current_violations = violations.size();
+
             //sort hotspot candidate buffer
-            auto rankedCandidates = rankBufferCandidates(state, violations);
-            cout << "rankedCandidates = " << rankedCandidates.size() << endl;
+            auto rankedCandidates = rankBufferCandidates(state, violations, weight_violations);
             //output_candidates(rankedCandidates);
 
             //candidate expand operation -> save to solution states
             auto CandidateOperations = GenerateCandidateOperations(state, rankedCandidates);
-            cout << "CandidateOperations = " << CandidateOperations.size() << endl;
+            //cout << "CandidateOperations = " << CandidateOperations.size() << endl;
+            if (CandidateOperations.size() <= 10) { // 如果hotspot buffer可優化的空間很少，就將critical paths修復的上限提高，修復更多critical paths
+                critical_to_solve += 5;
+            }
+            if (CandidateOperations.size() == 0) { // 這次迭代沒有可優化的空間了
+                return {state};
+            }
             //output_candidateoperations(CandidateOperations);
 
-            ApplyBestOperations(state, CandidateOperations, bufferCandidates);//將candidateOperation擇優放進state
-            cout << "Operations: " << state.operations.size() << "\n\n";
+            ApplyBestOperations(state, CandidateOperations, bufferCandidates); // 將candidateOperation依照分數高低放進state
+            //cout << "Operations: " << state.operations.size() << "\n\n";
 
             return {state};
         }
 
         // Pre-process
-        DPState Preprocess(){
-            db.subtreeFFs.resize(nodes.size(), {});
-            buildFFtoPaths();
-            output_FFpaths();
-            collectSubtreeFF(rootId);
-            DPState state = initializeNodeState();
+        DPState Preprocess(){ // 初始化Greedy Search要用到的資料
+            DPState state = initializeNodeState(); // 將nodeState都修改為沒有modified過
+
+            max_SS_buffer = getMaxSSDelay();
+            max_FF_buffer = getMaxFFDelay();
+            
             return state;
-        }
-
-        void buildFFtoPaths(){
-            db.FFtoPaths.resize(ffInfos.size(), {});
-
-            for(const auto& path : db.paths)
-            {
-                db.FFtoPaths[path.launchFF].push_back(
-                {
-                    path.id,
-                    PathRole::LAUNCH
-                });
-
-                db.FFtoPaths[path.captureFF].push_back(
-                {
-                    path.id,
-                    PathRole::CAPTURE
-                });
-            }
-        }
-
-        void collectSubtreeFF(const int nodeId){
-            db.subtreeFFs[nodeId].clear();
-            const TreeNode& node = db.tree[nodeId];
-
-            if(node.type == NodeType::FF)
-            {
-                db.subtreeFFs[nodeId].push_back(node.ffId);
-                return;
-            }
-
-            for(int childId : node.children)
-            {
-                collectSubtreeFF(childId);
-
-                db.subtreeFFs[nodeId].insert(
-                    db.subtreeFFs[nodeId].end(),
-                    db.subtreeFFs[childId].begin(),
-                    db.subtreeFFs[childId].end()
-                );
-            }
-
-            sort(db.subtreeFFs[nodeId].begin(), db.subtreeFFs[nodeId].end());
         }
 
         DPState initializeNodeState(){
@@ -371,11 +362,7 @@ namespace skew{
             state.pathSlackDeltaSS.assign(pathSize, 0.0);
             state.pathSlackDeltaFF.assign(pathSize, 0.0);
 
-            int nodeSize = nodes.size();
-            state.nodeOperationState.resize(nodeSize, {NodeOperationState(false, OperationType::NONE)});
-            //for (auto& s : state.nodeOperationState){
-            //    s = NodeOperationState(false, OperationType::NONE);
-            //}
+            state.nodeOperationState.resize(nodes.size(), {NodeOperationState(false, OperationType::NONE)});
 
             return state;
         }
@@ -383,10 +370,10 @@ namespace skew{
         //------------------------------------------
         //         Repair Critical Path
         //------------------------------------------
-        //修好最嚴重的10個violation paths（方法：在FF上插入多個連續的buffer）
+        //修好最嚴重的15個violation paths（方法：在FF上插入多個連續的buffer）
         //目前是都只挑選最大delay的buffer
-        void CriticalRepair(DPState& state, const vector<PathViolation>& violations) {
-            int topK = min(10, (int)violations.size());
+        void CriticalRepair(DPState& state, const vector<PathViolation>& violations, const int critical_to_solve) {
+            int topK = min(critical_to_solve, (int)violations.size());
             for (int i = 0; i < topK; i++) {
                 auto& v = violations[i];
                 if (v.setupSlack < 0.0 && v.setupWeight >= v.holdWeight) {
@@ -408,7 +395,7 @@ namespace skew{
             if (state.nodeOperationState[nodeId].modified)
                 return;
             
-            int insert_buffer = getMaxSSDelay();
+            int insert_buffer = max_SS_buffer;
             double ssDelay = cellLibs[insert_buffer].getDelaySS(1);
             double ffDelay = cellLibs[insert_buffer].getDelayFF(1);
             
@@ -416,8 +403,8 @@ namespace skew{
             double setup = path.setupSlack;
             double hold = path.holdSlack;
 
-            const double targetSlack = -0.10; // 修復setup的目標
-            const double holdLimit = 0.05; // 修復setup可以接受hold惡化的極限
+            const double targetSlack = critical_ss_threshold; // 修復setup的目標
+            const double holdLimit = critical_limit; // 修復setup可以接受hold惡化的極限
 
             while (setup < targetSlack) { //用while方便每次insert檢查hold的惡化程度
                 double newSetup = setup + ssDelay;
@@ -429,7 +416,7 @@ namespace skew{
                 setup = newSetup;
                 hold = newHold;
 
-                insertCount++;
+                insertCount++; // 將這個slack修到理想需要的insert的buffer數量
 
                 if (insertCount >= 5)
                     break;
@@ -439,13 +426,14 @@ namespace skew{
             
             double ssDelta = ssDelay * insertCount;
             double ffDelta = ffDelay * insertCount;
-            double areaDelta = cellLibs[insert_buffer].area;
+            double areaDelta = cellLibs[insert_buffer].area * insertCount;
 
-            // build operation
+            //直接將operation存到state裡，將critical paths的slack修到理想
             Operation op = Operation::Insert(parentId, nodeId, insert_buffer, insertCount, areaDelta, ssDelta, ffDelta);
             state.operations.push_back(op);
             state.nodeOperationState[nodeId].modified = true;
 
+            // 將operation對於path slack的影響存進pathSlackDelta，在下一步updateViolationLists重新計算slack並排序
             UpdatePathDelta(state, op, true);
         }
 
@@ -459,7 +447,7 @@ namespace skew{
             if (state.nodeOperationState[nodeId].modified)
                 return;
             
-            int insert_buffer = getMaxFFDelay();
+            int insert_buffer = max_FF_buffer;
             double ssDelay = cellLibs[insert_buffer].getDelaySS(1);
             double ffDelay = cellLibs[insert_buffer].getDelayFF(1);
             
@@ -467,10 +455,10 @@ namespace skew{
             double setup = path.setupSlack;
             double hold = path.holdSlack;
 
-            const double targetSlack = -0.05; // 修復hold的目標
-            const double setupLimit = 0.05; // 修復hold可以接受setup惡化的極限
+            const double targetSlack = critical_ff_threshold; // 修復hold的目標
+            const double setupLimit = critical_limit; // 修復hold可以接受setup惡化的極限
 
-            while (setup < targetSlack) { //用while方便每次insert檢查hold的惡化程度
+            while (hold < targetSlack) { //用while方便每次insert檢查hold的惡化程度
                 double newSetup = setup - ssDelay;
                 double newHold = hold + ffDelay;
 
@@ -490,7 +478,7 @@ namespace skew{
             
             double ssDelta = ssDelay * insertCount;
             double ffDelta = ffDelay * insertCount;
-            double areaDelta = cellLibs[insert_buffer].area;
+            double areaDelta = cellLibs[insert_buffer].area * insertCount;
 
             // build operation
             Operation op = Operation::Insert(parentId, nodeId, insert_buffer, insertCount, areaDelta, ssDelta, ffDelta);
@@ -557,6 +545,7 @@ namespace skew{
         }
 
         // Create Violation Paths List
+    // 目前是每次BS()都會跑兩次updateViolationList，應該蠻花時間的，可以想一下怎麼優化？
         vector<PathViolation> UpdateViolationList(DPState& state){
             vector<PathViolation> violations;
 
@@ -564,13 +553,15 @@ namespace skew{
             double wns_ss = 0.0;
             double tns_ff = 0.0;
             double wns_ff = 0.0;
+            int ss_count = 0;
+            int ff_count = 0;
 
             for (const auto& path : db.paths){
                 PathViolation v;
 
                 v.pathId = path.id;
                 
-                double ss = path.setupSlack + state.pathSlackDeltaSS[path.id];
+                double ss = path.setupSlack + state.pathSlackDeltaSS[path.id]; // 將operation對slack的影響加進path的slack
                 double ff = path.holdSlack + state.pathSlackDeltaFF[path.id];
 
                 v.setupSlack = ss;
@@ -578,6 +569,7 @@ namespace skew{
                 
                 if (ss < 0) {
                     v.setupWeight = ss * ss;
+                    ss_count++;
                     tns_ss += v.setupSlack;
                     if (wns_ss > v.setupSlack) {
                         wns_ss = v.setupSlack;
@@ -588,6 +580,7 @@ namespace skew{
 
                 if (ff < 0){
                     v.holdWeight = ff * ff;
+                    ff_count++;
                     tns_ff += v.holdSlack;
                     if (wns_ff > v.holdSlack) {
                         wns_ff = v.holdSlack;
@@ -596,14 +589,14 @@ namespace skew{
                 else
                     v.holdWeight = 0.0;
 
-                v.totalWeight = v.setupWeight + v.holdWeight;
+                v.totalWeight = v.setupWeight + v.holdWeight; // 大於等於0代表有negative slack
 
                 if (v.totalWeight > 0.0)
                     violations.push_back(v);
             }
-            cout << "violation paths = " << violations.size() << endl;
-            cout << "wns_ss = " << wns_ss << ", tns_ss = " << tns_ss << endl;
-            cout << "wns_ff = " << wns_ff << ", tns_ff = " << tns_ff << endl;
+            //cout << "violation paths = " << violations.size() << endl;
+            //cout << "wns_ss = " << wns_ss << ", tns_ss = " << tns_ss << ", nvp_ss = " << ss_count << endl;
+            //cout << "wns_ff = " << wns_ff << ", tns_ff = " << tns_ff << ", nvp_ff = " << ff_count << endl;
 
             // sort
             sort(violations.begin(), violations.end(), []
@@ -611,6 +604,7 @@ namespace skew{
                 return a.totalWeight > b.totalWeight;
             });
 
+            // 重置pathSlackDelta避免重複計算
             int pathSize = db.paths.size();
             state.pathSlackDeltaFF.assign(pathSize, 0.0);
             state.pathSlackDeltaSS.assign(pathSize, 0.0);
@@ -623,35 +617,52 @@ namespace skew{
         //------------------------------------------
 
         // Calculate weight of the buffers in the violation paths
-        void buildBufferCandidates ( //對violation paths經過的buffer計算權重，決定在哪些buffer上resize或insert buffer能夠盡量優化大范圍的violation paths
+        void buildBufferCandidates ( //對violation paths經過的buffer計算權重，決定在哪些buffer上resize或insert buffer最可能優化大范圍的violation paths
             const DPState& state,
-            const vector<PathViolation>& violations)
+            const vector<PathViolation>& violations,
+            const double weight_violations)
         {
             bufferCandidates.clear();
-            int topK = 0.4 * violations.size();
+            int topK = weight_violations * violations.size();
+            //cout << "In buildBufferCandidates, topK = " << topK << "(" << weight_violations << "*" << violations.size() << ")\n";
             for (int i = 0; i < topK; i++){
                 const auto& violation = violations[i];
                 const auto& path = db.paths[violation.pathId];
-
+                    //cout << "path " << path.id;
+                    //cout << ", capture: " << path.captureBuffers.size();
+                    //cout << ", launch: " << path.launchBuffers.size() << endl;
                 if (violation.setupSlack < 0){
                     for (int nodeId : path.captureBuffers){
-                        if (state.nodeOperationState[nodeId].modified)
+                        //cout << ", nodeId " << nodeId;
+                        //cout << ", ";
+                        if (state.nodeOperationState[nodeId].modified){
+                            //cout << "modified";
                             continue;
+                        }
+                        //else cout << "not modified";
                         updateBufferCandidate(nodeId, violation, RepairSide::CAPTURE);
                     }
                 }
                 if (violation.holdSlack < 0){
                     for (int nodeId : path.launchBuffers){
-                        if (state.nodeOperationState[nodeId].modified)
+                        //cout << ", nodeId " << nodeId;
+                        //cout << ", ";
+                        if (state.nodeOperationState[nodeId].modified) {
+                            //cout << "modified";
                             continue;
+                        }
+                        //else cout << "not modified";
                         updateBufferCandidate(nodeId, violation, RepairSide::LAUNCH);
                     }
                 }
+                //cout << endl;
             }
 
+            //cout << "Total weight = ";
             for (auto& kv : bufferCandidates){
                 auto& candidate = kv.second;
                 candidate.totalWeight = candidate.setupWeight + candidate.holdWeight;
+                //cout << candidate.totalWeight << endl;
             }
         }
 
@@ -666,23 +677,24 @@ namespace skew{
 
             if (side == RepairSide::CAPTURE) {
                 candidate.setupWeight += violation.setupWeight;
-                candidate.setupViolationCount ++;
+                //candidate.setupViolationCount ++;
                 //if (candidate.maxSetupSlack > violation.setupSlack)
                 //    candidate.maxSetupSlack = violation.setupSlack;
             }
             else {
                 candidate.holdWeight += violation.holdWeight;
-                candidate.holdViolationCount ++;
+                //candidate.holdViolationCount ++;
                 //if (candidate.maxHoldSlack > violation.holdSlack)
                 //    candidate.maxHoldSlack = violation.holdSlack;
             }
         }
     
         // Sort candidate buffers
-        vector<BufferCandidate*> rankBufferCandidates(const DPState& state, const vector<PathViolation>& violations){ //將buffer candidates通過權重進行排序，權重越高，經過的violation paths越嚴重/越多
+        vector<BufferCandidate*> rankBufferCandidates(const DPState& state, const vector<PathViolation>& violations, const double weight_violations){ //將buffer candidates通過權重進行排序，權重越高，經過的violation paths越嚴重/越多
             bufferCandidates.clear();
-            buildBufferCandidates(state, violations);
+            buildBufferCandidates(state, violations, weight_violations);
             //cout << "bufferCandidates.size() = " << bufferCandidates.size() << endl;
+            //cout << bufferCandidates[2].nodeId << ": " << bufferCandidates[2].setupWeight << ", " << bufferCandidates[2].holdWeight << endl;
             vector<BufferCandidate*> ranked;
             ranked.reserve(bufferCandidates.size());
             for(auto& kv : bufferCandidates)
@@ -756,15 +768,16 @@ namespace skew{
                 return ops;
             int fanout = nodes[nodeId].children.size();
 
+            //double maxSetupSlack = candidate.maxSetupSlack;
+
             // choose cell from library
             for (int cellId = 0; cellId < cellLibs.size(); cellId++){
                 auto& cell = cellLibs[cellId];
 
                 double SSDelta = cell.getDelaySS(1);
                 double FFDelta = cell.getDelayFF(1);
-                
-                CandidateOperation cand;
                 double areadelta = cell.area;
+                CandidateOperation cand;
 
                 int insertCount = 1;
                 cand.operation = Operation::Insert(parentId, nodeId, cellId, insertCount, areadelta, SSDelta, FFDelta);
@@ -777,9 +790,6 @@ namespace skew{
         void EstimateGain(CandidateOperation& cand, const BufferCandidate& buffer){ //粗略計算這個operation的gain值
             double ssDelay = cand.operation.ssDelayDelta;
             double ffDelay = cand.operation.ffDelayDelta;
-            
-            cand.SetupGain = ssDelay * buffer.setupViolationCount;
-            cand.HoldGain = ffDelay * buffer.holdViolationCount;
 
             int nodeId = buffer.nodeId;
             //output_delta << nodes[nodeId].name << ", op : ";
@@ -789,14 +799,12 @@ namespace skew{
             //    output_delta << "Insert " << cellLibs[cand.operation.newCellId].name << "(" << ssDelay << ", " << ffDelay << ")" << endl;
             double slackGain = calculateGain(nodeId, ssDelay, ffDelay);
             //output_delta << ", slackGain = " << slackGain << ", areaDelta = " << cand.operation.areaDelta << endl;
-            cand.score = slackGain - 0.0001 * cand.operation.areaDelta;
+            cand.score = slackGain - 0.00005 * cand.operation.areaDelta; // 0.0001
+            //cout << cand.score << " ";
         }
 
         double calculateGain(const int nodeId, const double& ssdelay, const double& ffdelay) { //計算這個operation對子樹的FFs身上的path slack的影響
             auto& affectedFFs = db.subtreeFFs[nodeId];
-
-            //double oldtotalSetupSlack = 0.0;
-            //double oldtotalHoldSlack = 0.0;
 
             double setupGain = 0.0;
             double holdGain = 0.0;
@@ -812,14 +820,10 @@ namespace skew{
 
                     if (oldSetupSlack >= 0.0 && oldHoldSlack >= 0.0)
                         continue;
-                    //oldtotalSetupSlack += oldSetupSlack;
-                    //oldtotalHoldSlack += oldHoldSlack;
 
-                    //output_delta << path.pathId << ": SS = " << oldSetupSlack << ", FF = " << oldHoldSlack << endl;
+                    //計算old和new的slack，並用penalty(old)-penalty(true)當做gain
                     if (path.pathRole == PathRole::CAPTURE) {
                         if (oldSetupSlack < 0.0){
-                            //if (ssdelay >= 0.0 && fabs(oldSetupSlack) > 10 * ssdelay)
-                            //    newtotalSetupSlack += (ssdelay);
                             newSetupSlack = oldSetupSlack + ssdelay;
                             oldSetupSlack = oldSetupSlack;
                         }
@@ -839,15 +843,14 @@ namespace skew{
                         }
                     }
                
+                    // 有優化到的話new^2會比old^2小， gain變大
                     setupGain += (Penalty(oldSetupSlack) - Penalty(newSetupSlack));
                     holdGain += (Penalty(oldHoldSlack) - Penalty(newHoldSlack));
                     //output_delta << "oldSetupSlack = " << oldSetupSlack << ", newSetupSlack = " << newSetupSlack << ", ";
                     //output_delta << "oldHoldSlack = " << oldHoldSlack << ", newHoldSlack = " << newHoldSlack << endl;
                 }
             }
-            //setupGain = (Penalty(oldH) - oldtotalSetupSlack); // fabs(oldtotalSetupSlack);
-            //holdGain = (newtotalHoldSlack - oldtotalHoldSlack) ;// fabs(oldtotalHoldSlack);
-            output_delta << "setupGain = " << setupGain << ", holdGain = " << holdGain;
+            //output_delta << "setupGain = " << setupGain << ", holdGain = " << holdGain;
             
             return (setupGain + holdGain);
         }
@@ -855,7 +858,10 @@ namespace skew{
         double Penalty(const double& slack) { //penalty = negative slack的平方，讓嚴重的negative slack有更大影響
             if (slack >= 0.0)
                 return 0.0;
-            return slack * slack;
+            if (cleanMode)// 讓很小的slack也有被考慮到
+                return fabs(slack);
+            else
+                return slack * slack;
         }
 
         //記錄BufferCandidates進行resize/insert的可能，並依照score進行排序
@@ -878,12 +884,11 @@ namespace skew{
                 {
                     EstimateGain(op, *buffer);
 
-                    if (op.score < -0.05) 
+                    if (op.score < -0.01) 
                         continue;
                     candidates.push_back(op);
                 }
 
-                //cout << "resize: " << candidates.size() << ", insert: ";
                 //Insert
                 auto& parentNode = nodes[nodeId];
                 for (auto& childId : parentNode.children) {
@@ -908,45 +913,25 @@ namespace skew{
                     }
                 }
                 
-                //cout << candidates.size() << endl;
             }
 
-            sort(candidates.begin(), candidates.end(),
-            [](const CandidateOperation& a, const CandidateOperation& b){
-                return a.score > b.score;
-            });
+            if (candidates.size() > 0) {
+                sort(candidates.begin(), candidates.end(),
+                [](const CandidateOperation& a, const CandidateOperation& b){
+                    return a.score > b.score;
+                });
+            }
 
-            //topK = min((int)candidates.size(), 200);
-            int resize_count = 0;
-            int insert_count = 0;
-            for (int c = 0; c < topK; c++){
-                if (candidates[c].operation.type == OperationType::RESIZE_BUFFER)
-                    resize_count++;
-                
-                if (candidates[c].operation.type == OperationType::INSERT_BUFFER)
-                    insert_count++;
-            }
-            cout << "Candidate Operations = "<< topK << ", resize = " << resize_count << ", insert = " << insert_count << endl;
-            /*for (int i = 0; i < topK; i++){
-                auto& cand = candidates[i];
-                output_delta << i << ": ";
-                if (cand.operation.type == OperationType::RESIZE_BUFFER)
-                    output_delta << nodes[cand.operation.nodeId].name << "(RESIZE): ";
-                else if (cand.operation.type == OperationType::INSERT_BUFFER)
-                    output_delta << nodes[cand.operation.nodeId].name << "(INSERT): ";
-                output_delta << "SetupGain = " << cand.SetupGain << ", HoldGain = " << cand.HoldGain << ", areaDelta = " << cand.operation.areaDelta << ", score = " << cand.score << endl;
-            }
-            output_delta << endl;*/
             return candidates;
         }
 
-        //從上面的candidateOperation中依照score大小一一放到solution中，並記錄為modified
+        //從上面的candidateOperation中依照score大小一一放到state中，並記錄為modified
         void ApplyBestOperations(
             DPState& state, 
             const vector<CandidateOperation>& CandidateOperations,
             const unordered_map<int, BufferCandidate>& bufferCandidates)
         {
-            const int applyOperationCount = min(((int)nodes.size()/200), 40); // 避免在一次迭代中修改太多，因為只是粗算優化結果，修改太多可能會重復優化同個部分導致惡化
+            const int applyOperationCount = max(((int)nodes.size()/200), 40); // 避免在一次迭代中修改太多，因為只是粗算優化結果，修改太多可能會重復優化同個部分導致惡化
             // apply的數量可以再調整，對於多個nodes的優化不明顯
             vector<uint8_t> repairCount; // 記錄這個FF在這次迭代被優化了幾次，避免一直重復被優化，導致其餘部分嚴重惡化
             repairCount.resize(ffInfos.size(), 0);
@@ -991,7 +976,7 @@ namespace skew{
             //cout << "\nApply done\n";
         }
 
-        bool OverlapRepaired(const vector<uint8_t>& repairCount, const int nodeId) {
+        bool OverlapRepaired(const vector<uint8_t>& repairCount, const int nodeId) { //原是為了避免在同次迭代中重復修同樣的slack，但似乎沒用到
             auto& subFFs = db.subtreeFFs[nodeId];
             int repaired = 0;
             for (auto& ff : subFFs) {
@@ -1026,7 +1011,7 @@ namespace skew{
 
             auto& affectedFFs = db.subtreeFFs[nodeId];
             for (auto& ff : affectedFFs) {
-                repairCount[ff]++;
+                repairCount[ff]++;//這似乎沒用到
 
                 auto& paths = db.FFtoPaths[ff];
 
@@ -1044,6 +1029,80 @@ namespace skew{
                 }
             }
         }
+    
+        // move from Evaluator
+        void applyOperationsToDB(skew::DesignDB& target_db, const std::vector<skew::Operation>& ops) {
+            int resizecount = 0;
+            for (const auto& op : ops) {
+                if (op.type == skew::OperationType::RESIZE_BUFFER) {
+                    // Resize: 更換 cellId 與 instType
+                    target_db.tree[op.nodeId].cellId = op.newCellId;
+                    target_db.tree[op.nodeId].instType = target_db.getCell(op.newCellId).name;
+                    resizecount += 1;
+                } 
+                else if (op.type == skew::OperationType::INSERT_BUFFER) { // 修改成可支援insertCount的
+                    // Insert: 新增 Node
+                    // add new_buf_name
+                    int parent = op.insertParentId;
+                    int child = op.insertChildId;
+
+                    int prevNode = parent; // prevNode代表當前插入的buffer的上面的node
+                    int newCellId = op.newCellId;
+                    for (int i = 0; i < op.insertCount; i++) { //修復critical path的insert count >= 1，其餘則都 = 1
+                        string newBufferName = "NEW_BUF_" + to_string(target_db.newBufferCount);
+                        int new_node_id = target_db.addTreeNode(
+                            newBufferName, 
+                            skew::NodeType::BUFFER, 
+                            target_db.getCell(newCellId).name, 
+                            target_db.tree[child].level, // 調整 Level
+                            newCellId
+                        );
+                        //cout << "new_node_id  = "<< new_node_id << ", tree_size = " << db.tree.size() << endl;
+                        //cout << "newbuffername = " << newBufferName << " ";
+                        target_db.newBufferCount++;
+                        
+                        // 將 New Buffer 標記起來
+                        target_db.tree[new_node_id].isNewBuffer = true;
+
+                        // 重新綁定 Parent 與 Child
+                        replaceChildInTree(target_db, prevNode, child, new_node_id);
+                        target_db.setParent(child, new_node_id);
+                        target_db.tree[child].level; // 更新下游 Level
+                        updateSubtreeLevel(
+                            target_db,
+                            child,
+                            1
+                        );
+                        db.UpdateSubtreeFFs(new_node_id);
+                        prevNode = new_node_id;
+                    }
+                }
+
+            }
+            //cout << "resize(" << resizecount << "), insert(" << newBufferCount << ")\n";
+        }
+
+        // add update level function
+        void updateSubtreeLevel(DesignDB& db, int nodeId, int delta){
+            db.tree[nodeId].level += delta;
+
+            for(int child : db.tree[nodeId].children){
+                updateSubtreeLevel(db, child, delta);
+            }
+        }
+
+        // 將 Child 從 Parent 的陣列中替換為 New Node
+        void replaceChildInTree(skew::DesignDB& target_db, int parentId, int oldChildId, int newChildId) {
+            auto& children = target_db.tree[parentId].children;
+            for (auto& child : children) {
+                if (child == oldChildId) {
+                    child = newChildId;
+                    break;
+                }
+            }
+            target_db.tree[newChildId].parent = parentId;
+        }
+
     };
 }
 
