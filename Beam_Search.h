@@ -72,7 +72,9 @@ namespace skew{
             critical_ss_threshold = db.critical_ss_threshold;
             critical_ff_threshold = db.critical_ff_threshold;
             critical_limit = db.critical_limit;
+#ifdef DEBUG
             cout << "Nodes = " << nodes.size() << ", FFs = " << ffInfos.size() << endl;
+#endif
 
             //check_violation.open("check_violation.txt");
             //output_candop.open("Candidates_Operations.txt");
@@ -272,7 +274,9 @@ namespace skew{
                 }
                 count++;
             }
+#ifdef DEBUG
             cout << "Resize = " << resize_count << ", Insert = " << insert_count << endl;
+#endif
         }
 
         void output_FFpaths(){
@@ -956,7 +960,9 @@ namespace skew{
 
                 //檢查operation是否是在修已修過的node
                 if (OverlapRepaired(repairCount, nodeId)) {
+#ifdef DEBUG
                     cout << "overlap ";// 似乎沒用到
+#endif
                     continue;
                 }
 
@@ -972,7 +978,9 @@ namespace skew{
                 if (applied > applyOperationCount)
                     break;
             }
+#ifdef DEBUG
             cout << "Resize count = " << resized << ", Insert count = " << inserted << endl;
+#endif
             //cout << "\nApply done\n";
         }
 
