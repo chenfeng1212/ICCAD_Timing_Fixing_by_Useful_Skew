@@ -187,38 +187,38 @@ capture -> launch
 - **Critical Paths Repair**：選出前 15 條violation paths作為本次迭代要修復的 critical paths。每完成一輪修復後，都會重新更新 violation paths。
 - **Build and Ranked Buffer Candidates**：選取前一定比例（例如前 50%）的 violation paths，根據前面建立的資料結構，對這些paths經過的 buffers 進行加權，並依照權重排序，產生 Candidate Buffers。
 - **Generate Candidate Operations**：針對每個 Candidate Buffer 產生 Resize 和 Insert 等 Candidate Operations，計算 score 並排序。
--- 有Candidate Operations產生，進入ApplyBestOperation。
--- 沒有Candidate Operations產生，回到更新violation list，進入下一次迭代。
+    - 有Candidate Operations產生，進入ApplyBestOperation。
+    - 沒有Candidate Operations產生，回到更新violation list，進入下一次迭代。
 - **Apply Best Operations**：依照 score 套用最佳的操作，並更新node的State，包括 node 的modified以及 path 的 slack 變化。
--- Tips：因為這些 operations 都是根據同一次迭代開始時的 timing 計算，因此會限制每次實際套用的 operation 數量，避免後續操作仍依據已經過時的 slack 資訊。
--- 未達到迭代次數上限，繼續下一輪 Greedy Search迭代。
--- 已達到迭代次數上限，就會將累積的 operations 進入到Apply Operations to DB實際套用到 Clock Tree上，完成這次的Run Greedy Search的迭代。
+    - Tips：因為這些 operations 都是根據同一次迭代開始時的 timing 計算，因此會限制每次實際套用的 operation 數量，避免後續操作仍依據已經過時的 slack 資訊。
+    - 未達到迭代次數上限，繼續下一輪 Greedy Search迭代。
+    - 已達到迭代次數上限，就會將累積的 operations 進入到Apply Operations to DB實際套用到 Clock Tree上，完成這次的Run Greedy Search的迭代。
 
 
 ### Initialization：預先建立常用的資料結構
 基於三個方向：Tree Nodes，Flip-Flops，Paths
 1. 基於Tree Nodes：``` vector<vector<int>> SubtreeFFs ```
--- 使用``` InitializeSubTreeFFs ```初始化和``` UpdateSubtreeFFs ```更新每個node底下有哪些Flip-Flops。
--- 優點：當我們修改node的時候可以快速知道有哪些Flip-Flops會受到影響。
+    - 使用``` InitializeSubTreeFFs ```初始化和``` UpdateSubtreeFFs ```更新每個node底下有哪些Flip-Flops。
+    - 優點：當我們修改node的時候可以快速知道有哪些Flip-Flops會受到影響。
 
 2. 基於Flip-Flops：``` vector<vector<PathInfo>> FFtoPaths ```
--- 使用``` buildFFtoPaths ```建立FF到path的對應關係，記錄每個FF參與的Timing Path，以及它在path中是capture或launch的那邊。
--- 優點：當某個FF的timing改變的時候能夠立刻找到所有受影響的timing paths並更新slack。
+    - 使用``` buildFFtoPaths ```建立FF到path的對應關係，記錄每個FF參與的Timing Path，以及它在path中是capture或launch的那邊。
+    - 優點：當某個FF的timing改變的時候能夠立刻找到所有受影響的timing paths並更新slack。
 
 3. 基於Paths：``` struct Path ```
--- ``` int LCANode ``` 代表path的capture FF和launch FF的最近共同祖先。
--- ``` vector<int> captureBuffers ``` 代表從LCA到captureFF路徑上的所有buffers。
--- ``` vector<int> launchBuffers ``` 代表從LCA到launchFF路徑上的所有buffers。
--- 優點：在Greedy Search時不需要反復遍歷clock tree尋找路徑，可以直接取得需要評估的buffers。
+    - ``` int LCANode ``` 代表path的capture FF和launch FF的最近共同祖先。
+    - ``` vector<int> captureBuffers ``` 代表從LCA到captureFF路徑上的所有buffers。
+    - ``` vector<int> launchBuffers ``` 代表從LCA到launchFF路徑上的所有buffers。
+    - 優點：在Greedy Search時不需要反復遍歷clock tree尋找路徑，可以直接取得需要評估的buffers。
 
 #### 一些參數
 1. ``` double weight_violations ``` 代表找bufferCandidates的時候要看前多少%的violation paths，cleanMode為false就是初始化為0.5，每次Greedy Search+0.05，逐步提升考慮的violation paths的量；cleanMode為true代表Run Greedy Search迭代超過一定次數或是critical_to_solve的值大於15，這時就要開始考慮全部的violations，所以weight_violations初始化為1.0。
 2. ``` critical_ss_threshold ``` 代表每次修復setup critcial paths時setup negative slack的目標，目前是設置-0.05 -> +0.01。
 3. ``` critical_ff_threshold ``` 代表每次修復hold critcial paths時hold negative slack的目標，目前是設置-0.05 -> +0.01。
 4. ``` critical_limit ``` 代表每次修復setup/hold corner時另一個corner能接受的惡化極限，目前是設置+0.02 -> -0.001。
-*箭頭代表cleanMode*
 5. ``` critical_to_solve ``` 代表Greedy Search的Critical Paths Repair中要修好的Critical Paths數量。
 
+*箭頭代表cleanMode*
 
 
 <!--
